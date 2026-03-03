@@ -1,47 +1,81 @@
 import os
 import asyncio
 import sqlite3
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
+from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # -------------------------
-# ENVIRONMENT VARIABLES
+# ENV
 # -------------------------
 TOKEN = os.getenv("TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-GROUP_ID = int(os.getenv("GROUP_ID"))
+ADMIN_ID = int(os.getenv("ADMIN_ID")
 
-if not TOKEN or not ADMIN_ID or not GROUP_ID:
-    raise ValueError("Missing environment variables.")
+if not TOKEN:
+    raise ValueError("TOKEN missing")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-scheduler = AsyncIOScheduler()
 
 # -------------------------
-# DATABASE SETUP
+# DATABASE
 # -------------------------
 conn = sqlite3.connect("rice.db")
 cursor = conn.cursor()
 
+# Groups
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    name TEXT,
-    username TEXT,
-    points INTEGER DEFAULT 0
+CREATE TABLE IF NOT EXISTS groups (
+    group_id INTEGER PRIMARY KEY,
+    member_count INTEGER
 )
 """)
 
+# Users
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS scored_posts (
+CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER,
-    message_id INTEGER,
-    PRIMARY KEY (user_id, message_id)
+    group_id INTEGER,
+    name TEXT,
+    username TEXT,
+    monthly_points INTEGER DEFAULT 0,
+    PRIMARY KEY (user_id, group_id)
+)
+""")
+
+# Posts
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS posts (
+    post_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER,
+    telegram_message_id INTEGER,
+    type TEXT,
+    question TEXT,
+    correct_option INTEGER,
+    created_at TEXT
+)
+""")
+
+# Responses
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS responses (
+    post_id INTEGER,
+    user_id INTEGER,
+    selected_option INTEGER,
+    correct INTEGER,
+    PRIMARY KEY (post_id, user_id)
+)
+""")
+
+# Monthly archive
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS monthly_archive (
+    group_id INTEGER,
+    user_id INTEGER,
+    month TEXT,
+    points INTEGER
 )
 """)
 
@@ -53,82 +87,136 @@ conn.commit()
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
-def add_user_if_not_exists(user):
-    cursor.execute("SELECT user_id FROM users WHERE user_id=?", (user.id,))
-    if cursor.fetchone() is None:
-        cursor.execute(
-            "INSERT INTO users (user_id, name, username, points) VALUES (?, ?, ?, 0)",
-            (user.id, user.full_name, user.username)
-        )
-        conn.commit()
+def ensure_group(group_id):
+    cursor.execute("INSERT OR IGNORE INTO groups (group_id, member_count) VALUES (?, ?)", (group_id, 0))
+    conn.commit()
 
-def add_point(user, message_id):
-    cursor.execute(
-        "SELECT 1 FROM scored_posts WHERE user_id=? AND message_id=?",
-        (user.id, message_id)
-    )
+def ensure_user(user, group_id):
+    cursor.execute("""
+        INSERT OR IGNORE INTO users (user_id, group_id, name, username, monthly_points)
+        VALUES (?, ?, ?, ?, 0)
+    """, (user.id, group_id, user.full_name, user.username))
+    conn.commit()
 
-    if cursor.fetchone() is None:
-        cursor.execute(
-            "INSERT INTO scored_posts (user_id, message_id) VALUES (?, ?)",
-            (user.id, message_id)
-        )
-        cursor.execute(
-            "UPDATE users SET points = points + 1 WHERE user_id=?",
-            (user.id,)
-        )
-        conn.commit()
-
-# -------------------------
-# WEEKLY LEADERBOARD JOB
-# -------------------------
-async def weekly_leaderboard():
-    cursor.execute(
-        "SELECT name, username, points FROM users ORDER BY points DESC LIMIT 10"
-    )
-    rows = cursor.fetchall()
-
-    if not rows:
-        return
-
-    text = "Weekly RICE Leaderboard\n\n"
-
-    for i, row in enumerate(rows, start=1):
-        name, username, points = row
-        if username:
-            text += f"{i}. {name} (@{username}) - {points}\n"
-        else:
-            text += f"{i}. {name} - {points}\n"
-
-    await bot.send_message(GROUP_ID, text)
-
-    # Reset scores
-    cursor.execute("UPDATE users SET points = 0")
-    cursor.execute("DELETE FROM scored_posts")
+def add_points(user_id, group_id, points):
+    cursor.execute("""
+        UPDATE users
+        SET monthly_points = monthly_points + ?
+        WHERE user_id = ? AND group_id = ?
+    """, (points, user_id, group_id))
     conn.commit()
 
 # -------------------------
-# DECISION POST (ABCD)
+# SET MEMBER COUNT
 # -------------------------
-@dp.message(Command("decision"))
-async def decision_post(message: Message):
+@dp.message(Command("setmembers"))
+async def set_members(message: Message):
     if not is_admin(message.from_user.id):
         return
 
-    parts = message.text.split(maxsplit=1)
+    try:
+        count = int(message.text.split()[1])
+    except:
+        await message.reply("Usage: /setmembers 180")
+        return
+
+    group_id = message.chat.id
+    ensure_group(group_id)
+
+    cursor.execute("UPDATE groups SET member_count=? WHERE group_id=?", (count, group_id))
+    conn.commit()
+
+    await message.reply(f"Member count set to {count}")
+
+# -------------------------
+# QUIZ / POLL / CTA
+# -------------------------
+async def create_structured_post(message: Message, post_type: str):
+    if not is_admin(message.from_user.id):
+        return
+
+    group_id = message.chat.id
+    ensure_group(group_id)
+
+    parts = message.text.split("|")
+    if len(parts) < 3:
+        await message.reply("Invalid format.")
+        return
+
+    header = parts[0].split(maxsplit=1)
+    if len(header) < 2:
+        await message.reply("Question missing.")
+        return
+
+    question = header[1].strip()
+    options = [p.strip() for p in parts[1:-1] if p.strip()] if post_type == "quiz" else [p.strip() for p in parts[1:] if p.strip()]
+
+    correct_option = None
+    if post_type == "quiz":
+        try:
+            correct_option = int(parts[-1])
+            options = [p.strip() for p in parts[1:-1]]
+        except:
+            await message.reply("Quiz must end with correct option number.")
+            return
+
+    if not 2 <= len(options) <= 4:
+        await message.reply("Options must be 2-4.")
+        return
+
+    builder = InlineKeyboardBuilder()
+    for idx, opt in enumerate(options, start=1):
+        builder.button(text=opt, callback_data=f"{post_type}:{idx}")
+    builder.adjust(1)
+
+    sent = await message.answer(question, reply_markup=builder.as_markup())
+
+    cursor.execute("""
+        INSERT INTO posts (group_id, telegram_message_id, type, question, correct_option, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (group_id, sent.message_id, post_type, question, correct_option, datetime.now().isoformat()))
+    conn.commit()
+
+    try:
+        await message.delete()
+    except:
+        pass
+
+@dp.message(Command("quiz"))
+async def quiz(message: Message):
+    await create_structured_post(message, "quiz")
+
+@dp.message(Command("poll"))
+async def poll(message: Message):
+    await create_structured_post(message, "poll")
+
+@dp.message(Command("cta"))
+async def cta(message: Message):
+    await create_structured_post(message, "cta")
+
+# -------------------------
+# LINK (NO POINTS)
+# -------------------------
+@dp.message(Command("link"))
+async def link(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    parts = message.text.split("|")
     if len(parts) < 2:
         return
 
-    question = parts[1]
+    header = parts[0].split(maxsplit=1)
+    if len(header) < 2:
+        return
+
+    text = header[1].strip()
+    url = parts[1].strip()
 
     builder = InlineKeyboardBuilder()
-    builder.button(text="A", callback_data="decision_A")
-    builder.button(text="B", callback_data="decision_B")
-    builder.button(text="C", callback_data="decision_C")
-    builder.button(text="D", callback_data="decision_D")
-    builder.adjust(4)
+    builder.button(text="Open Link", url=url)
 
-    await message.answer(question, reply_markup=builder.as_markup())
+    await message.answer(text, reply_markup=builder.as_markup())
 
     try:
         await message.delete()
@@ -136,86 +224,88 @@ async def decision_post(message: Message):
         pass
 
 # -------------------------
-# OPINION POST (XYZ)
+# HANDLE RESPONSES
 # -------------------------
-@dp.message(Command("opinion"))
-async def opinion_post(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        return
-
-    question = parts[1]
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text="X", callback_data="opinion_X")
-    builder.button(text="Y", callback_data="opinion_Y")
-    builder.button(text="Z", callback_data="opinion_Z")
-    builder.adjust(3)
-
-    await message.answer(question, reply_markup=builder.as_markup())
-
-    try:
-        await message.delete()
-    except:
-        pass
-
-# -------------------------
-# HANDLE CTA CLICKS
-# -------------------------
-@dp.callback_query(F.data.startswith(("decision_", "opinion_")))
-async def handle_click(callback: CallbackQuery):
+@dp.callback_query(F.data.contains(":"))
+async def handle_response(callback: CallbackQuery):
+    group_id = callback.message.chat.id
     user = callback.from_user
-    message_id = callback.message.message_id
 
-    add_user_if_not_exists(user)
-    add_point(user, message_id)
+    post_type, option_index = callback.data.split(":")
+    option_index = int(option_index)
+
+    cursor.execute("""
+        SELECT post_id, correct_option
+        FROM posts
+        WHERE telegram_message_id=? AND group_id=?
+    """, (callback.message.message_id, group_id))
+    post = cursor.fetchone()
+
+    if not post:
+        return
+
+    post_id, correct_option = post
+
+    cursor.execute("""
+        SELECT 1 FROM responses WHERE post_id=? AND user_id=?
+    """, (post_id, user.id))
+    if cursor.fetchone():
+        await callback.answer("Already responded.")
+        return
+
+    ensure_user(user, group_id)
+
+    correct = 0
+    points = 1
+
+    if post_type == "quiz":
+        if option_index == correct_option:
+            correct = 1
+            points += 2
+
+    add_points(user.id, group_id, points)
+
+    cursor.execute("""
+        INSERT INTO responses (post_id, user_id, selected_option, correct)
+        VALUES (?, ?, ?, ?)
+    """, (post_id, user.id, option_index, correct))
+    conn.commit()
 
     await callback.answer("Recorded")
 
 # -------------------------
-# ADMIN LEADERBOARD COMMAND
+# ADMIN SCOREBOARD
 # -------------------------
-@dp.message(Command("leaderboard"))
-async def leaderboard(message: Message):
+@dp.message(Command("scoreboard"))
+async def scoreboard(message: Message):
     if not is_admin(message.from_user.id):
         return
 
-    cursor.execute(
-        "SELECT name, username, points FROM users ORDER BY points DESC LIMIT 10"
-    )
+    group_id = message.chat.id
+
+    cursor.execute("""
+        SELECT name, username, monthly_points
+        FROM users
+        WHERE group_id=?
+        ORDER BY monthly_points DESC
+    """, (group_id,))
     rows = cursor.fetchall()
 
     if not rows:
-        await message.reply("No activity yet.")
+        await message.reply("No data.")
         return
 
-    text = "Weekly RICE Leaderboard\n\n"
-
-    for i, row in enumerate(rows, start=1):
+    text = "Current Month Scoreboard\n\n"
+    for i, row in enumerate(rows, 1):
         name, username, points = row
-        if username:
-            text += f"{i}. {name} (@{username}) - {points}\n"
-        else:
-            text += f"{i}. {name} - {points}\n"
+        text += f"{i}. {name} - {points}\n"
 
     await message.reply(text)
 
 # -------------------------
-# START BOT
+# START
 # -------------------------
 async def main():
-    scheduler.add_job(
-        weekly_leaderboard,
-        trigger="cron",
-        day_of_week="sun",
-        hour=21,
-        minute=0
-    )
-    scheduler.start()
-
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
