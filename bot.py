@@ -1,9 +1,6 @@
 import os
 import asyncio
 import sqlite3
-import os
-if os.path.exists("rice.db"):
-    os.remove("rice.db")
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
