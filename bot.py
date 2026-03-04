@@ -10,6 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
+OWNER_ID = int(os.getenv("OWNER_ID"))
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -63,8 +64,7 @@ conn.commit()
 # ---------------- HELPERS ----------------
 
 def generate_post_code(post_type):
-    date_code = datetime.now().strftime("%d%m%y")
-    return f"{post_type}_{date_code}"
+    return f"{post_type}_{datetime.now().strftime('%d%m%y')}"
 
 def ensure_user(user):
     cursor.execute("""
@@ -110,22 +110,18 @@ def build_keyboard(post_id):
 @dp.message(Command("start"))
 async def start(message: Message):
 
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("Engagement bot active.")
-        return
-
-    await message.answer(
+    if message.from_user.id == OWNER_ID:
+        await message.answer(
 """RICE Bot Active
 
 Commands:
 /quiz
 /poll
 /cta
-/link
 /setmembers
 /scoreboard
-/resetscores
-/report"""
+/report
+/resetscores"""
 )
 
 # ---------------- SET MEMBERS ----------------
@@ -148,8 +144,6 @@ async def set_members(message: Message):
     conn.commit()
 
     await message.delete()
-
-    await message.answer(f"Members set to {count}")
 
 # ---------------- CREATE POSTS ----------------
 
@@ -193,7 +187,7 @@ async def create_post(message:Message,post_type):
     cursor.execute("""
     INSERT INTO posts(post_code,telegram_message_id,type,question,options,correct_option,created_at)
     VALUES(?,?,?,?,?,?,?)
-    """,(post_code,sent.message_id,post_type,question,options_string,correct_option,datetime.now()))
+    """,(post_code,sent.message_id,post_type,question,options_string,correct_option,datetime.now().isoformat()))
 
     conn.commit()
 
@@ -219,56 +213,13 @@ async def poll(message:Message):
 async def cta(message:Message):
     await create_post(message,"cta")
 
-# ---------------- LINK (TRACKED) ----------------
-
-@dp.message(Command("link"))
-async def link(message:Message):
-
-    if message.from_user.id != ADMIN_ID:
-        return
-
-    parts = message.text.split("|")
-
-    header = parts[0].split(maxsplit=1)
-
-    text = header[1].strip()
-
-    url = parts[1].strip()
-
-    post_code = generate_post_code("link")
-
-    msg = await message.answer(f"{post_code}\n\n{text}")
-
-    cursor.execute("""
-    INSERT INTO posts(post_code,telegram_message_id,type,question,options,correct_option,created_at)
-    VALUES(?,?,?,?,?,?,?)
-    """,(post_code,msg.message_id,"link",text,"Read Article",None,datetime.now()))
-
-    conn.commit()
-
-    post_id = cursor.lastrowid
-
-    builder = InlineKeyboardBuilder()
-
-    builder.button(text="Read Article (0)",callback_data=f"{post_id}:1")
-
-    await bot.edit_message_reply_markup(
-        chat_id=msg.chat.id,
-        message_id=msg.message_id,
-        reply_markup=builder.as_markup()
-    )
-
-    await message.delete()
-
 # ---------------- BUTTON CLICK ----------------
 
 @dp.callback_query(F.data.contains(":"))
 async def handle_click(callback:CallbackQuery):
 
     try:
-        data = callback.data.split(":")
-        post_id = int(data[0])
-        option_index = int(data[1])
+        post_id, option_index = map(int, callback.data.split(":"))
     except:
         return
 
@@ -306,7 +257,7 @@ async def handle_click(callback:CallbackQuery):
 
             correct=1
             points += 2
-            popup="Correct answer"
+            popup="Correct"
 
         else:
 
@@ -341,6 +292,7 @@ async def scoreboard(message:Message):
     SELECT name,points
     FROM users
     ORDER BY points DESC
+    LIMIT 20
     """)
 
     rows = cursor.fetchall()
@@ -348,11 +300,76 @@ async def scoreboard(message:Message):
     text="Scoreboard\n\n"
 
     for i,row in enumerate(rows,1):
-        text+=f"{i}. {row[0]} - {row[1]}\n"
+        text+=f"{i}. {row[0]} – {row[1]}\n"
 
     await message.delete()
 
-    await message.answer(text)
+    await bot.send_message(OWNER_ID,text)
+
+# ---------------- REPORT ----------------
+
+@dp.message(Command("report"))
+async def report(message:Message):
+
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    cursor.execute("SELECT value FROM settings WHERE key='members'")
+    row = cursor.fetchone()
+    members = int(row[0]) if row else 0
+
+    cursor.execute("""
+    SELECT post_id,post_code,type,options,correct_option
+    FROM posts
+    ORDER BY created_at DESC
+    """)
+
+    posts = cursor.fetchall()
+
+    report_text="Engagement Report\n\n"
+
+    for post_id,post_code,ptype,options_string,correct_option in posts:
+
+        options = options_string.split("|")
+
+        cursor.execute("""
+        SELECT COUNT(*) FROM responses WHERE post_id=?
+        """,(post_id,))
+
+        participants = cursor.fetchone()[0]
+
+        rate = round((participants/members)*100,1) if members else 0
+
+        report_text += f"{post_code}\nParticipants: {participants} ({rate}%)\n"
+
+        cursor.execute("""
+        SELECT selected_option,COUNT(*)
+        FROM responses
+        WHERE post_id=?
+        GROUP BY selected_option
+        """,(post_id,))
+
+        votes = dict(cursor.fetchall())
+
+        for i,opt in enumerate(options,1):
+            report_text += f"{opt} – {votes.get(i,0)}\n"
+
+        if ptype=="quiz":
+
+            cursor.execute("""
+            SELECT COUNT(*) FROM responses
+            WHERE post_id=? AND correct=1
+            """,(post_id,))
+
+            correct = cursor.fetchone()[0]
+
+            report_text += f"Correct: {correct}\n"
+
+        report_text += "\n"
+
+    await message.delete()
+
+    await bot.send_message(OWNER_ID,report_text)
 
 # ---------------- RESET ----------------
 
@@ -366,41 +383,6 @@ async def reset_scores(message:Message):
     conn.commit()
 
     await message.delete()
-
-    await message.answer("Scores reset")
-
-# ---------------- REPORT ----------------
-
-@dp.message(Command("report"))
-async def report(message:Message):
-
-    if message.from_user.id != ADMIN_ID:
-        return
-
-    cursor.execute("SELECT value FROM settings WHERE key='members'")
-    row = cursor.fetchone()
-
-    members = int(row[0]) if row else 0
-
-    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM responses")
-    participants = cursor.fetchone()[0]
-
-    percent = 0
-
-    if members>0:
-        percent = round((participants/members)*100,1)
-
-    text=f"""
-Engagement Report
-
-Members: {members}
-Participants: {participants}
-Participation: {percent}%
-"""
-
-    await message.delete()
-
-    await message.answer(text)
 
 # ---------------- START BOT ----------------
 
