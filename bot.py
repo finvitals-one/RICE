@@ -8,7 +8,6 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
@@ -17,7 +16,6 @@ dp = Dispatcher()
 
 conn = sqlite3.connect("rice.db")
 cursor = conn.cursor()
-
 
 # ---------------- DATABASE ----------------
 
@@ -62,13 +60,11 @@ value TEXT
 
 conn.commit()
 
-
 # ---------------- HELPERS ----------------
 
 def generate_post_code(post_type):
     date_code = datetime.now().strftime("%d%m%y")
     return f"{post_type}_{date_code}"
-
 
 def ensure_user(user):
     cursor.execute("""
@@ -77,7 +73,6 @@ def ensure_user(user):
     """,(user.id,user.full_name,user.username))
     conn.commit()
 
-
 def add_points(user_id,points):
     cursor.execute("""
     UPDATE users SET points = points + ?
@@ -85,15 +80,10 @@ def add_points(user_id,points):
     """,(points,user_id))
     conn.commit()
 
-
 def build_keyboard(post_id):
 
-    cursor.execute("""
-    SELECT options FROM posts WHERE post_id=?
-    """,(post_id,))
-    row = cursor.fetchone()
-
-    options = row[0].split("|")
+    cursor.execute("SELECT options FROM posts WHERE post_id=?", (post_id,))
+    options = cursor.fetchone()[0].split("|")
 
     builder = InlineKeyboardBuilder()
 
@@ -115,9 +105,30 @@ def build_keyboard(post_id):
 
     return builder.as_markup()
 
+# ---------------- START ----------------
 
-# ---------------- COMMANDS ----------------
+@dp.message(Command("start"))
+async def start(message: Message):
 
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("Engagement bot active.")
+        return
+
+    await message.answer(
+"""RICE Bot Active
+
+Commands:
+/quiz
+/poll
+/cta
+/link
+/setmembers
+/scoreboard
+/resetscores
+/report"""
+)
+
+# ---------------- SET MEMBERS ----------------
 
 @dp.message(Command("setmembers"))
 async def set_members(message: Message):
@@ -138,8 +149,7 @@ async def set_members(message: Message):
 
     await message.delete()
 
-    await bot.send_message(ADMIN_ID,f"Members set to {count}")
-
+    await message.answer(f"Members set to {count}")
 
 # ---------------- CREATE POSTS ----------------
 
@@ -197,23 +207,19 @@ async def create_post(message:Message,post_type):
 
     await message.delete()
 
-
 @dp.message(Command("quiz"))
 async def quiz(message:Message):
     await create_post(message,"quiz")
-
 
 @dp.message(Command("poll"))
 async def poll(message:Message):
     await create_post(message,"poll")
 
-
 @dp.message(Command("cta"))
 async def cta(message:Message):
     await create_post(message,"cta")
 
-
-# ---------------- LINK ----------------
+# ---------------- LINK (TRACKED) ----------------
 
 @dp.message(Command("link"))
 async def link(message:Message):
@@ -223,26 +229,48 @@ async def link(message:Message):
 
     parts = message.text.split("|")
 
-    text = parts[0].split(maxsplit=1)[1].strip()
+    header = parts[0].split(maxsplit=1)
+
+    text = header[1].strip()
 
     url = parts[1].strip()
 
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Open Link",url=url)
+    post_code = generate_post_code("link")
 
-    await message.answer(text,reply_markup=builder.as_markup())
+    msg = await message.answer(f"{post_code}\n\n{text}")
+
+    cursor.execute("""
+    INSERT INTO posts(post_code,telegram_message_id,type,question,options,correct_option,created_at)
+    VALUES(?,?,?,?,?,?,?)
+    """,(post_code,msg.message_id,"link",text,"Read Article",None,datetime.now()))
+
+    conn.commit()
+
+    post_id = cursor.lastrowid
+
+    builder = InlineKeyboardBuilder()
+
+    builder.button(text="Read Article (0)",callback_data=f"{post_id}:1")
+
+    await bot.edit_message_reply_markup(
+        chat_id=msg.chat.id,
+        message_id=msg.message_id,
+        reply_markup=builder.as_markup()
+    )
 
     await message.delete()
-
 
 # ---------------- BUTTON CLICK ----------------
 
 @dp.callback_query(F.data.contains(":"))
 async def handle_click(callback:CallbackQuery):
 
-    data = callback.data.split(":")
-    post_id = int(data[0])
-    option_index = int(data[1])
+    try:
+        data = callback.data.split(":")
+        post_id = int(data[0])
+        option_index = int(data[1])
+    except:
+        return
 
     user = callback.from_user
 
@@ -301,7 +329,6 @@ async def handle_click(callback:CallbackQuery):
 
     await callback.answer(popup,show_alert=True)
 
-
 # ---------------- SCOREBOARD ----------------
 
 @dp.message(Command("scoreboard"))
@@ -325,8 +352,7 @@ async def scoreboard(message:Message):
 
     await message.delete()
 
-    await bot.send_message(ADMIN_ID,text)
-
+    await message.answer(text)
 
 # ---------------- RESET ----------------
 
@@ -341,8 +367,7 @@ async def reset_scores(message:Message):
 
     await message.delete()
 
-    await bot.send_message(ADMIN_ID,"Scores reset")
-
+    await message.answer("Scores reset")
 
 # ---------------- REPORT ----------------
 
@@ -375,17 +400,15 @@ Participation: {percent}%
 
     await message.delete()
 
-    await bot.send_message(ADMIN_ID,text)
+    await message.answer(text)
 
-
-# ---------------- START ----------------
+# ---------------- START BOT ----------------
 
 async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
 
     await dp.start_polling(bot)
-
 
 if __name__=="__main__":
     asyncio.run(main())
