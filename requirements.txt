@@ -1,2 +1,2 @@
-aiogram
-apscheduler
+aiogram>=3.0
+requests>=2.31
