@@ -191,11 +191,17 @@ async def scheduler():
             continue
 
 
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        now = datetime.utcnow() + timedelta(hours=5, minutes=30)
 
         print("Current time:", now)
+
+        scheduled = parse_datetime(date_val, time_val)
+
+        print("Checking:", scheduled)
+
+        if now >= scheduled:
 
 
         for row in rows:
