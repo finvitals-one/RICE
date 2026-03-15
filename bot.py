@@ -191,9 +191,9 @@ async def scheduler():
             continue
 
 
-        from datetime import timedelta
+        from datetime import datetime, timedelta, timezone
 
-        now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+        now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
 
         print("Current time:", now)
 
