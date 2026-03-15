@@ -4,7 +4,7 @@ import asyncio
 import sqlite3
 import requests
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
@@ -79,7 +79,7 @@ def fetch_sheet():
 
         clean = {}
 
-        for k,v in row.items():
+        for k, v in row.items():
             if k:
                 clean[k.strip().lower()] = v.strip() if v else ""
 
@@ -88,26 +88,22 @@ def fetch_sheet():
     return rows
 
 
-def parse_datetime(date_str,time_str):
+def parse_datetime(date_str, time_str):
 
     formats = [
-
-        ("%d/%m/%Y","%H:%M"),
-        ("%d/%m/%Y","%H:%M:%S"),
-        ("%d-%m-%Y","%H:%M"),
-        ("%d-%m-%Y","%H:%M:%S")
-
+        ("%d/%m/%Y", "%H:%M"),
+        ("%d/%m/%Y", "%H:%M:%S"),
+        ("%d-%m-%Y", "%H:%M"),
+        ("%d-%m-%Y", "%H:%M:%S")
     ]
 
-    for df,tf in formats:
+    for df, tf in formats:
 
         try:
-
             return datetime.strptime(
                 f"{date_str} {time_str}",
                 f"{df} {tf}"
             )
-
         except:
             pass
 
@@ -115,7 +111,6 @@ def parse_datetime(date_str,time_str):
 
 
 def row_key(row):
-
     return f"{row['date']}_{row['time']}_{row['type']}_{row['question']}"
 
 
@@ -124,17 +119,13 @@ def row_key(row):
 async def create_post(row):
 
     question = row["question"]
-
     options = [o.strip() for o in row["options"].split("|") if o.strip()]
-
-    correct = row.get("correct","")
-
+    correct = row.get("correct", "")
     ptype = row["type"].lower()
 
     builder = InlineKeyboardBuilder()
 
-    for i,opt in enumerate(options,1):
-
+    for i, opt in enumerate(options, 1):
         builder.button(
             text=opt,
             callback_data=f"{ptype}:{i}"
@@ -151,17 +142,15 @@ async def create_post(row):
     correct_option = None
 
     if ptype == "quiz":
-
         try:
             correct_option = int(correct)
         except:
             correct_option = None
 
-
     cursor.execute("""
     INSERT INTO posts(message_id,correct_option)
     VALUES(?,?)
-    """,(sent.message_id,correct_option))
+    """, (sent.message_id, correct_option))
 
     conn.commit()
 
@@ -177,45 +166,18 @@ async def scheduler():
     while True:
 
         try:
-
             rows = fetch_sheet()
-
             print("Rows fetched:", len(rows))
 
         except Exception as e:
-
             print("Sheet error:", e)
-
             await asyncio.sleep(120)
-
             continue
 
-
-        from datetime import datetime, timedelta
-
         now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-
         print("Current time:", now)
 
-        scheduled = parse_datetime(date_val, time_val)
-
-        print("Checking:", scheduled)
-
-        if now >= scheduled:
-
-
         for row in rows:
-
-            key = row_key(row)
-
-            cursor.execute(
-                "SELECT 1 FROM scheduled_posts WHERE row_key=?",
-                (key,)
-            )
-
-            if cursor.fetchone():
-                continue
-
 
             date_val = row.get("date")
             time_val = row.get("time")
@@ -223,20 +185,26 @@ async def scheduler():
             if not date_val or not time_val:
                 continue
 
-
-            scheduled = parse_datetime(date_val,time_val)
+            scheduled = parse_datetime(date_val, time_val)
 
             if not scheduled:
                 continue
 
-
             print("Checking:", scheduled)
-
 
             if now >= scheduled:
 
-                try:
+                key = row_key(row)
 
+                cursor.execute(
+                    "SELECT 1 FROM scheduled_posts WHERE row_key=?",
+                    (key,)
+                )
+
+                if cursor.fetchone():
+                    continue
+
+                try:
                     await create_post(row)
 
                     cursor.execute(
@@ -245,13 +213,10 @@ async def scheduler():
                     )
 
                     conn.commit()
-
                     print("Scheduled post executed")
 
                 except Exception as e:
-
                     print("Post error:", e)
-
 
         await asyncio.sleep(60)
 
@@ -268,28 +233,25 @@ async def handle_response(callback: CallbackQuery):
     SELECT post_id,correct_option
     FROM posts
     WHERE message_id=?
-    """,(message_id,))
+    """, (message_id,))
 
     post = cursor.fetchone()
 
     if not post:
         return
 
-    post_id,correct_option = post
+    post_id, correct_option = post
 
     cursor.execute("""
     SELECT 1 FROM responses
     WHERE post_id=? AND user_id=?
-    """,(post_id,user.id))
+    """, (post_id, user.id))
 
     if cursor.fetchone():
-
         await callback.answer("Already responded")
-
         return
 
-
-    ptype,option = callback.data.split(":")
+    ptype, option = callback.data.split(":")
     option = int(option)
 
     points = 1
@@ -297,23 +259,21 @@ async def handle_response(callback: CallbackQuery):
     if ptype == "quiz" and option == correct_option:
         points += 2
 
-
     cursor.execute("""
     INSERT OR IGNORE INTO users(user_id,group_id,name)
     VALUES(?,?,?)
-    """,(user.id,GROUP_ID,user.full_name))
+    """, (user.id, GROUP_ID, user.full_name))
 
     cursor.execute("""
     UPDATE users
     SET points = points + ?
     WHERE user_id=? AND group_id=?
-    """,(points,user.id,GROUP_ID))
-
+    """, (points, user.id, GROUP_ID))
 
     cursor.execute("""
     INSERT INTO responses(post_id,user_id)
     VALUES(?,?)
-    """,(post_id,user.id))
+    """, (post_id, user.id))
 
     conn.commit()
 
@@ -323,7 +283,7 @@ async def handle_response(callback: CallbackQuery):
 # ---------------- RESET SCORES ----------------
 
 @dp.message(Command("resetscores"))
-async def reset_scores(message:Message):
+async def reset_scores(message: Message):
 
     if message.from_user.id != ADMIN_ID:
         return
@@ -339,7 +299,7 @@ async def reset_scores(message:Message):
 # ---------------- SCOREBOARD ----------------
 
 @dp.message(Command("scoreboard"))
-async def scoreboard(message:Message):
+async def scoreboard(message: Message):
 
     cursor.execute("""
     SELECT name,points
@@ -352,8 +312,7 @@ async def scoreboard(message:Message):
 
     text = "🏆 RICE Leaderboard\n\n"
 
-    for i,row in enumerate(rows,1):
-
+    for i, row in enumerate(rows, 1):
         text += f"{i}. {row[0]} — {row[1]}\n"
 
     await message.reply(text)
