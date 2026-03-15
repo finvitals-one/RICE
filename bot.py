@@ -380,6 +380,9 @@ async def start(message: Message):
     if message.chat.type != "private":
         return
 
+    # DEBUG — remove after confirming ADMIN_ID is correct
+    await message.answer(f"Your ID: {message.from_user.id}\nADMIN_ID set: {ADMIN_ID}")
+
     if message.from_user.id != ADMIN_ID:
         return
 
