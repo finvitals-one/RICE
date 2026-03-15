@@ -4,7 +4,7 @@ import asyncio
 import sqlite3
 import requests
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
@@ -257,7 +257,7 @@ async def scheduler():
             await asyncio.sleep(120)
             continue
 
-        now = datetime.now(datetime.UTC).replace(tzinfo=None) + timedelta(hours=5, minutes=30)
+        now = datetime.now()
         print(f"Current time: {now}")
 
         for row in rows:
