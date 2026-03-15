@@ -4,12 +4,14 @@ import asyncio
 import sqlite3
 import requests
 
-from datetime import datetime, timedelta, timezone
-
+from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+
+print("RICE BOT LOADING")
 
 
 TOKEN = os.getenv("TOKEN")
@@ -52,7 +54,6 @@ PRIMARY KEY(post_id,user_id)
 )
 """)
 
-# NEW table for scheduler state
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS scheduled_posts(
 row_key TEXT PRIMARY KEY
@@ -70,7 +71,6 @@ def fetch_sheet():
     r.raise_for_status()
 
     lines = r.content.decode("utf-8").splitlines()
-
     reader = csv.DictReader(lines)
 
     rows = []
@@ -102,6 +102,7 @@ def parse_datetime(date_str,time_str):
     for df,tf in formats:
 
         try:
+
             return datetime.strptime(
                 f"{date_str} {time_str}",
                 f"{df} {tf}"
@@ -113,13 +114,12 @@ def parse_datetime(date_str,time_str):
     return None
 
 
-# create unique key for each sheet row
 def row_key(row):
 
     return f"{row['date']}_{row['time']}_{row['type']}_{row['question']}"
 
 
-# ---------------- CREATE POST ----------------
+# ---------------- POST CREATION ----------------
 
 async def create_post(row):
 
@@ -157,6 +157,7 @@ async def create_post(row):
         except:
             correct_option = None
 
+
     cursor.execute("""
     INSERT INTO posts(message_id,correct_option)
     VALUES(?,?)
@@ -164,20 +165,36 @@ async def create_post(row):
 
     conn.commit()
 
+    print("Post created:", question)
+
 
 # ---------------- SCHEDULER ----------------
 
 async def scheduler():
 
+    print("Scheduler started")
+
     while True:
 
         try:
+
             rows = fetch_sheet()
-        except:
+
+            print("Rows fetched:", len(rows))
+
+        except Exception as e:
+
+            print("Sheet error:", e)
+
             await asyncio.sleep(120)
+
             continue
 
-        now = datetime.now(timezone.utc) + timedelta(hours=5,minutes=30)
+
+        now = datetime.now()
+
+        print("Current time:", now)
+
 
         for row in rows:
 
@@ -205,9 +222,7 @@ async def scheduler():
                 continue
 
 
-            scheduled = scheduled.replace(
-                tzinfo=timezone.utc
-            ) + timedelta(hours=5,minutes=30)
+            print("Checking:", scheduled)
 
 
             if now >= scheduled:
@@ -223,14 +238,17 @@ async def scheduler():
 
                     conn.commit()
 
-                except:
-                    pass
+                    print("Scheduled post executed")
+
+                except Exception as e:
+
+                    print("Post error:", e)
 
 
         await asyncio.sleep(60)
 
 
-# ---------------- RESPONSE HANDLING ----------------
+# ---------------- RESPONSES ----------------
 
 @dp.callback_query(F.data.contains(":"))
 async def handle_response(callback: CallbackQuery):
@@ -259,6 +277,7 @@ async def handle_response(callback: CallbackQuery):
     if cursor.fetchone():
 
         await callback.answer("Already responded")
+
         return
 
 
@@ -281,6 +300,7 @@ async def handle_response(callback: CallbackQuery):
     SET points = points + ?
     WHERE user_id=? AND group_id=?
     """,(points,user.id,GROUP_ID))
+
 
     cursor.execute("""
     INSERT INTO responses(post_id,user_id)
@@ -305,7 +325,7 @@ async def reset_scores(message:Message):
 
     conn.commit()
 
-    await message.reply("Scores reset")
+    await message.reply("RICE scores reset")
 
 
 # ---------------- SCOREBOARD ----------------
@@ -313,18 +333,16 @@ async def reset_scores(message:Message):
 @dp.message(Command("scoreboard"))
 async def scoreboard(message:Message):
 
-    if message.from_user.id != ADMIN_ID:
-        return
-
     cursor.execute("""
     SELECT name,points
     FROM users
     ORDER BY points DESC
+    LIMIT 20
     """)
 
     rows = cursor.fetchall()
 
-    text = "🏆 RICE Board\n\n"
+    text = "🏆 RICE Leaderboard\n\n"
 
     for i,row in enumerate(rows,1):
 
@@ -336,6 +354,8 @@ async def scoreboard(message:Message):
 # ---------------- START ----------------
 
 async def main():
+
+    print("RICE bot starting")
 
     await bot.delete_webhook(drop_pending_updates=True)
 
