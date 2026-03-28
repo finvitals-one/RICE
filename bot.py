@@ -117,7 +117,7 @@ def build_keyboard(post_id):
         count = cursor.fetchone()[0]
 
         builder.button(
-            text=f"{opt} ({count})",
+            text=f"{opt.strip()} ({count})",
             callback_data=f"{post_id}:{i}"
         )
 
@@ -148,6 +148,8 @@ def fetch_sheet():
 
         rows.append(clean)
 
+    print(f"Rows fetched: {len(rows)}")
+
     return rows
 
 
@@ -157,11 +159,12 @@ def parse_datetime(date_str, time_str):
         ("%d/%m/%Y", "%H:%M"),
         ("%d/%m/%Y", "%H:%M:%S"),
         ("%d-%m-%Y", "%H:%M"),
-        ("%d-%m-%Y", "%H:%M:%S")
+        ("%d-%m-%Y", "%H:%M:%S"),
+        ("%Y-%m-%d", "%H:%M"),
+        ("%Y-%m-%d", "%H:%M:%S")
     ]
 
     for df, tf in formats:
-
         try:
             return datetime.strptime(
                 f"{date_str} {time_str}",
@@ -173,19 +176,25 @@ def parse_datetime(date_str, time_str):
     return None
 
 
-def row_key(row):
-    # Unique key from date + time + type — no sheet structure change needed
+def get_row_key(row):
+    # Use post_id from sheet if available, else fall back to date_time_type
+    post_id = row.get("post_id", "").strip()
+    if post_id:
+        return f"rice_{post_id}"
     return f"{row['date']}_{row['time']}_{row['type']}"
 
 
 def generate_post_code(row):
     ptype = row["type"].upper()
+    post_id = row.get("post_id", "").strip()
+    if post_id:
+        return f"{ptype}_{post_id}"
     date_part = row["date"].replace("/", "").replace("-", "")
     time_part = row["time"].replace(":", "")
     return f"{ptype}_{date_part}_{time_part}"
 
 
-# ---------------- POST CREATION (from sheet row) ----------------
+# ---------------- POST CREATION ----------------
 
 async def create_post(row):
 
@@ -207,7 +216,7 @@ async def create_post(row):
 
     text = f"{post_code}\n\n{question}"
 
-    # Initial keyboard with 0 counts (temp callback to avoid issues)
+    # Initial keyboard with 0 counts
     builder = InlineKeyboardBuilder()
 
     for i, opt in enumerate(options, 1):
@@ -228,13 +237,13 @@ async def create_post(row):
 
     conn.commit()
 
-    post_id = cursor.lastrowid
+    db_post_id = cursor.lastrowid
 
     # Update keyboard with real post_id in callback_data
     await bot.edit_message_reply_markup(
         chat_id=GROUP_ID,
         message_id=sent.message_id,
-        reply_markup=build_keyboard(post_id)
+        reply_markup=build_keyboard(db_post_id)
     )
 
     print(f"Post created: {post_code} | {question}")
@@ -250,7 +259,6 @@ async def scheduler():
 
         try:
             rows = fetch_sheet()
-            print(f"Rows fetched: {len(rows)}")
 
         except Exception as e:
             print(f"Sheet error: {e}")
@@ -262,6 +270,16 @@ async def scheduler():
 
         for row in rows:
 
+            # Only process rice rows
+            bot_col = row.get("bot", "").strip().lower()
+            if bot_col != "rice":
+                continue
+
+            # Validate required fields
+            ptype = row.get("type", "").strip().lower()
+            if ptype not in ("quiz", "poll", "cta"):
+                continue
+
             date_val = row.get("date")
             time_val = row.get("time")
 
@@ -271,11 +289,12 @@ async def scheduler():
             scheduled = parse_datetime(date_val, time_val)
 
             if not scheduled:
+                print(f"Invalid datetime: {date_val} {time_val}")
                 continue
 
             if now >= scheduled:
 
-                key = row_key(row)
+                key = get_row_key(row)
 
                 cursor.execute(
                     "SELECT 1 FROM scheduled_posts WHERE row_key=?",
@@ -352,7 +371,7 @@ async def handle_click(callback: CallbackQuery):
             points += 2
             popup = "Correct ✅"
         else:
-            popup = f"Wrong ❌  Correct: {options[correct_option - 1]}"
+            popup = f"Wrong ❌  Correct: {options[correct_option - 1].strip()}"
 
     add_points(user.id, points)
 
@@ -392,6 +411,7 @@ async def start(message: Message):
 Commands:
 /setmembers [count] — Set total group members
 /scoreboard — View leaderboard
+/whois [name] — Look up a member by name or username
 /report — View engagement report
 /resetscores — Reset all scores and responses"""
     )
@@ -436,7 +456,7 @@ async def scoreboard(message: Message):
         return
 
     cursor.execute("""
-    SELECT name, points
+    SELECT name, username, user_id, points
     FROM users
     ORDER BY points DESC
     LIMIT 20
@@ -451,7 +471,53 @@ async def scoreboard(message: Message):
     text = "🏆 RICE Leaderboard\n\n"
 
     for i, row in enumerate(rows, 1):
-        text += f"{i}. {row[0]} — {row[1]}\n"
+        name = row[0] or "Unknown"
+        username = f"@{row[1]}" if row[1] else "no username"
+        user_id = row[2]
+        points = row[3]
+        text += f"{i}. {name} | {username} | ID: {user_id} — {points} pts\n"
+
+    await message.answer(text)
+
+
+# ---------------- /whois ----------------
+
+@dp.message(Command("whois"))
+async def whois(message: Message):
+
+    if message.chat.type != "private":
+        return
+
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    try:
+        query = message.text.split(maxsplit=1)[1].strip().lower()
+    except:
+        await message.answer("Usage: /whois [name or username]\nExample: /whois RK or /whois Tejas")
+        return
+
+    cursor.execute("""
+    SELECT name, username, user_id, points
+    FROM users
+    WHERE LOWER(name) LIKE ? OR LOWER(username) LIKE ?
+    ORDER BY points DESC
+    """, (f"%{query}%", f"%{query}%"))
+
+    rows = cursor.fetchall()
+
+    if not rows:
+        await message.answer(f"No users found matching: {query}")
+        return
+
+    text = f"🔍 Results for '{query}':\n\n"
+
+    for row in rows:
+        name = row[0] or "Unknown"
+        username = f"@{row[1]}" if row[1] else "no username"
+        user_id = row[2]
+        points = row[3]
+        text += f"• {name} | {username} | ID: {user_id} — {points} pts\n"
 
     await message.answer(text)
 
@@ -511,7 +577,7 @@ async def report(message: Message):
         votes = dict(cursor.fetchall())
 
         for i, opt in enumerate(options, 1):
-            report_text += f"  {opt} — {votes.get(i, 0)}\n"
+            report_text += f"  {opt.strip()} — {votes.get(i, 0)}\n"
 
         if ptype == "quiz":
 
@@ -539,10 +605,7 @@ async def reset_scores(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
 
-    # Reset points
     cursor.execute("UPDATE users SET points=0")
-
-    # Clear responses — so users can participate again after reset
     cursor.execute("DELETE FROM responses")
 
     conn.commit()
